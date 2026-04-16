@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>EPL Quiz</title>
+<title>EPL Quiz v6</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
@@ -290,7 +290,7 @@
       <div class="bg-[#f0f7ff] rounded-[16px] p-4 space-y-1"><p class="text-[11px] font-semibold text-[#0071e3] uppercase tracking-wider">오늘의 퀴즈</p><p id="s-info" class="text-[17px] font-bold text-[#1d1d1f]">—</p><p id="s-qcnt" class="text-[13px] text-[#86868b]">—</p></div>
       <button onclick="startQuiz()" class="btn-p w-full py-3.5 rounded-[12px] font-semibold text-[15px]">퀴즈 시작하기 →</button>
     </div>
-    <div id="s-no-quiz" class="bg-white rounded-[24px] border border-[#e5e5e5] p-6 text-center hidden"><p class="text-[28px] mb-2">😴</p><p class="text-[14px] font-semibold">지정된 퀴즈가 없어요</p></div>
+    <div id="s-no-quiz" class="bg-white rounded-[24px] border border-[#e5e5e5] p-6 text-center"><p class="text-[28px] mb-2">😴</p><p class="text-[14px] font-semibold">지정된 퀴즈가 없어요</p></div>
     <div class="bg-white rounded-[20px] border border-[#e5e5e5] p-5" id="s-stats-wrap" style="display:none">
       <div class="flex items-center justify-between mb-4"><h3 id="s-stats-name" class="text-[16px] font-bold">내 성적</h3><span id="s-pass-rate" class="text-[12px] bg-[#f5f5f7] px-3 py-1 rounded-full text-[#86868b] font-medium"></span></div>
       <div class="grid grid-cols-3 gap-3 mb-4">
@@ -1505,7 +1505,7 @@ async function savePastedQuizzes() {
 }
 
 // ── Utils ─────────────────────────────────────
-function mkId(b,u){return b.trim().replace(/\s+/g,'_')+'__'+u.trim().replace(/\s+/g,'_');}
+function mkId(b,u){return b.trim().replace(/\s+/g,'_').replace(/\//g,'-')+'__'+u.trim().replace(/\s+/g,'_').replace(/\//g,'-');}
 function shk(id){var e=document.getElementById(id);e.style.animation='';void e.offsetWidth;e.style.animation='sh 0.3s ease';e.addEventListener('animationend',function(){e.style.animation='';},{once:true});}
 document.addEventListener('DOMContentLoaded',function(){go('view-login');init();});
 document.getElementById('li-id').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('li-pw').focus();});
