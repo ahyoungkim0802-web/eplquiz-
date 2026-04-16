@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>EPL Quiz v15</title>
+<title>EPL Quiz v17</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
@@ -844,6 +844,7 @@ function switchMode(m){
 
 // ── Claude API PDF 분석 ───────────────────────
 var answerPdfText = '';
+var questionPdfText = '';
 var analyzedUnits = [];
 
 async function loadAnswerPdf(input) {
@@ -956,69 +957,126 @@ async function analyzeWithClaude() {
   var status = document.getElementById('analyze-status');
   btn.disabled = true;
   status.classList.remove('hidden');
-  document.getElementById('analyze-msg').textContent = '분석 중...';
-  document.getElementById('analyze-bar').style.width = '10%';
+
+  var steps = [
+    {msg:'정답지 분석 중...', p:20},
+    {msg:'유닛 구조 파악 중...', p:40},
+    {msg:'문제 텍스트 추출 중...', p:65},
+    {msg:'유닛별 정리 중...', p:85}
+  ];
+  var si = 0;
+  var ticker = setInterval(function(){
+    if (si < steps.length) {
+      document.getElementById('analyze-msg').textContent = steps[si].msg;
+      document.getElementById('analyze-bar').style.width = steps[si].p + '%';
+      si++;
+    }
+  }, 2500);
 
   try {
-    // 텍스트를 청크로 나눔 (13000자씩)
+    // Step 1: 정답지 → 유닛 + 정답 추출 (청크 분할)
     var chunkSize = 13000;
-    var chunks = [];
+    var ansChunks = [];
     for (var i = 0; i < answerPdfText.length; i += chunkSize) {
-      chunks.push(answerPdfText.substring(i, i + chunkSize));
+      ansChunks.push(answerPdfText.substring(i, i + chunkSize));
     }
 
     var allUnits = [];
-    for (var ci = 0; ci < chunks.length; ci++) {
-      document.getElementById('analyze-msg').textContent = '분석 중... (' + (ci+1) + '/' + chunks.length + ')';
-      document.getElementById('analyze-bar').style.width = Math.round((ci+1)/chunks.length*90) + '%';
-
-      var prompt = 'English grammar workbook answer key (part ' + (ci+1) + ' of ' + chunks.length + ').'
-        + ' Extract ALL units and Section A answers. Return ONLY valid JSON, nothing else.'
-        + ' Format: {"units":[{"unit":"Ch01-U01 title","answers":["am","are","is"]},...]}'
-        + ' If no units found in this part, return {"units":[]}'
-        + ' Text: ' + chunks[ci];
-
+    for (var ci = 0; ci < ansChunks.length; ci++) {
+      document.getElementById('analyze-msg').textContent = '정답 추출 중... (' + (ci+1) + '/' + ansChunks.length + ')';
       var resp = await fetch(workerUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {'Content-Type':'application/json'},
         body: JSON.stringify({
           model: 'claude-haiku-4-5-20251001',
           max_tokens: 6000,
-          messages: [{ role: 'user', content: prompt }]
+          messages: [{role:'user', content:
+            'Answer key part ' + (ci+1) + ' of ' + ansChunks.length + '. Extract ALL units and Section A answers. Return ONLY JSON: {"units":[{"unit":"Ch01-U01 title","answers":["am","are"]},...]}'
+            + ' If no units found return {"units":[]}. Text: ' + ansChunks[ci]
+          }]
         })
       });
-
-      var data = await resp.json();
-      if (data.error) throw new Error(data.error.message);
-      var raw = (data.content && data.content[0] && data.content[0].text) || '{"units":[]}';
-      var clean = raw.replace(/```json/g,'').replace(/```/g,'').trim();
-      var parsed = JSON.parse(clean);
-      if (parsed.units && parsed.units.length) {
-        allUnits = allUnits.concat(parsed.units);
-      }
+      var d = await resp.json();
+      if (d.error) throw new Error(d.error.message);
+      var raw = (d.content&&d.content[0]&&d.content[0].text)||'{"units":[]}';
+      var parsed = JSON.parse(raw.replace(/```json/g,'').replace(/```/g,'').trim());
+      if (parsed.units && parsed.units.length) allUnits = allUnits.concat(parsed.units);
     }
 
     // 중복 제거
     var seen = {};
-    analyzedUnits = allUnits.filter(function(u) {
+    analyzedUnits = allUnits.filter(function(u){
       if (seen[u.unit]) return false;
       seen[u.unit] = true;
       return u.answers && u.answers.length > 0;
     });
 
+    // Step 2: 문제지가 있으면 문제 텍스트 추출
+    if (questionPdfText && questionPdfText.length > 100) {
+      document.getElementById('analyze-msg').textContent = '문제 텍스트 추출 중...';
+      document.getElementById('analyze-bar').style.width = '70%';
+      
+      var qChunks = [];
+      for (var i = 0; i < questionPdfText.length; i += 13000) {
+        qChunks.push(questionPdfText.substring(i, i + 13000));
+      }
+
+      var allQUnits = [];
+      for (var qi = 0; qi < Math.min(qChunks.length, 4); qi++) {
+        document.getElementById('analyze-msg').textContent = '문제 분석 중... (' + (qi+1) + '/' + Math.min(qChunks.length,4) + ')';
+        var qResp = await fetch(workerUrl, {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 8000,
+            messages: [{role:'user', content:
+              'English grammar workbook questions part ' + (qi+1) + '. Extract ALL units and their Section A exercise questions in order.'
+              + ' Each question is a fill-in-the-blank or sentence. Return ONLY JSON:'
+              + ' {"units":[{"unit":"Ch01-U01 title","questions":["He ___ a student.","They ___ happy."]},...]} '
+              + ' If no units found return {"units":[]}. Text: ' + qChunks[qi]
+            }]
+          })
+        });
+        var qd = await qResp.json();
+        if (!qd.error) {
+          var qraw = (qd.content&&qd.content[0]&&qd.content[0].text)||'{"units":[]}';
+          try {
+            var qparsed = JSON.parse(qraw.replace(/```json/g,'').replace(/```/g,'').trim());
+            if (qparsed.units && qparsed.units.length) allQUnits = allQUnits.concat(qparsed.units);
+          } catch(e) {}
+        }
+      }
+
+      // 정답 유닛에 문제 텍스트 매칭
+      if (allQUnits.length) {
+        analyzedUnits = analyzedUnits.map(function(u) {
+          // 유닛명 유사도로 매칭
+          var match = allQUnits.find(function(qu) {
+            var a = u.unit.toLowerCase().replace(/\s+/g,'');
+            var b = qu.unit.toLowerCase().replace(/\s+/g,'');
+            return a === b || a.includes(b.substring(0,8)) || b.includes(a.substring(0,8));
+          });
+          if (match && match.questions && match.questions.length) {
+            u.questions = match.questions;
+          }
+          return u;
+        });
+      }
+    }
+
+    clearInterval(ticker);
     document.getElementById('analyze-bar').style.width = '100%';
     document.getElementById('analyze-msg').textContent = '완료! ' + analyzedUnits.length + '개 유닛';
 
     setTimeout(function() {
       status.classList.add('hidden');
-      if (!analyzedUnits.length) {
-        alert('유닛을 찾지 못했습니다.');
-      } else {
-        renderResultUnits();
-      }
+      if (!analyzedUnits.length) { alert('유닛을 찾지 못했습니다.'); }
+      else { renderResultUnits(); }
     }, 400);
 
   } catch(e) {
+    clearInterval(ticker);
     status.classList.add('hidden');
     alert('오류: ' + e.message);
   }
@@ -1059,7 +1117,7 @@ async function saveResultQuizzes() {
     var cb = document.getElementById('rc-'+i);
     var ni = document.getElementById('ru-'+i);
     if (cb && cb.checked && ni && ni.value.trim() && u.answers && u.answers.length) {
-      toSave.push({unit: ni.value.trim(), answers: u.answers});
+      toSave.push({unit: ni.value.trim(), answers: u.answers, questions: u.questions||[]});
     }
   });
   if (!toSave.length) { alert('저장할 유닛을 선택해주세요.'); return; }
@@ -1069,291 +1127,30 @@ async function saveResultQuizzes() {
     for (var i = 0; i < toSave.length; i++) {
       btn.textContent = '저장 중... (' + (i+1) + '/' + toSave.length + ')';
       var item = toSave[i];
-      var qs = item.answers.map(function(a, idx){ return {q:(idx+1)+'번', a:a}; });
+      // Build questions array: use extracted text if available, else just number
+      var qs = item.answers.map(function(a, idx) {
+        var qtext = (item.questions && item.questions[idx]) ? item.questions[idx] : ((idx+1)+'번');
+        return {q: qtext, a: a};
+      });
       var data = {book:book, unit:item.unit, questions:qs, createdAt:new Date().toISOString()};
+      // Add PDF pages only to first unit (to avoid size limit)
       if (mkQuizPages.length && i === 0) data.pages = mkQuizPages;
       await db.collection('quizzes').doc(mkId(book, item.unit)).set(data);
     }
-    alert('✅ 완료! ' + toSave.length + '개 유닛 저장됨');
-    analyzedUnits = []; document.getElementById('result-panel').classList.add('hidden'); document.getElementById('result-empty').classList.remove('hidden');
+    alert('✅ ' + toSave.length + '개 유닛 저장!');
+    analyzedUnits = [];
+    document.getElementById('result-panel').classList.add('hidden');
+    document.getElementById('result-empty').classList.remove('hidden');
     document.getElementById('result-book').value = '';
-    document.getElementById('apdf-zone').removeAttribute('style');
-    document.getElementById('apdf-prev').innerHTML = '<p class="text-[36px]">📋</p><p class="text-[14px] font-semibold text-[#86868b]">정답지 PDF 업로드</p><p class="text-[12px] text-[#aeaeb2]">클릭하여 선택</p>';
-    answerPdfText = ''; checkReadyToAnalyze();
-    clearQPdf();
+    clearQPdf(); answerPdfText = ''; questionPdfText = '';
+    checkReadyToAnalyze();
+    var az=document.getElementById('apdf-zone'); if(az)az.removeAttribute('style');
+    var ai=document.getElementById('apdf-icon'); if(ai)ai.textContent='📋';
+    var al=document.getElementById('apdf-label'); if(al)al.textContent='정답지 PDF 업로드';
   } catch(e) { alert('오류: ' + e.message); }
   btn.disabled = false; btn.textContent = '💾 선택한 유닛 전체 저장';
 }
 
-// ── 교재 추가 저장 (단일) ──────────────────────
-function countAnsLines(){
-  var NL=String.fromCharCode(10);
-  var n=document.getElementById('mk-answers').value.trim().split(NL).filter(function(l){return l.trim();}).length;
-  document.getElementById('ans-line-count').textContent=n+'문항';
-}
-
-async function saveQuizSimple(){
-  var book=document.getElementById('mk-book').value.trim();
-  var unit=document.getElementById('mk-unit').value.trim();
-  if(!book||!unit){alert('교재명과 유닛명을 입력해주세요.');return;}
-  var NL=String.fromCharCode(10);
-  var lines=document.getElementById('mk-answers').value.trim().split(NL).map(function(l){return l.trim();}).filter(Boolean);
-  if(!lines.length){alert('정답을 입력해주세요.');return;}
-  var questions=lines.map(function(ans,i){return{q:(i+1)+'번',a:ans};});
-  var btn=document.getElementById('mk-btn');btn.disabled=true;btn.textContent='저장 중...';
-  try{
-    var data={book:book,unit:unit,questions:questions,createdAt:new Date().toISOString()};
-    if(mkQuizPages.length)data.pages=mkQuizPages;
-    await db.collection('quizzes').doc(mkId(book,unit)).set(data);
-    alert('저장 완료! ('+questions.length+'문항'+(mkQuizPages.length?' + PDF '+mkQuizPages.length+'p':'')+')');
-    cancelEdit();
-  }catch(e){alert('저장 실패: '+e.message);}
-  btn.disabled=false;btn.textContent=editingQuizId?'수정 저장':'저장하기';
-}
-
-// ── 문제지 PDF (퀴즈에 저장) ──────────────────
-var mkQuizPages = [];
-
-async function loadQuizPdf(input) {
-  var file=input.files[0];if(!file)return;input.value='';
-  mkQuizPages=[];
-  document.getElementById('qpdf-progress').classList.remove('hidden');
-  try{
-    if(file.type==='application/pdf'){
-      var buf=await file.arrayBuffer();var pdf=await pdfjsLib.getDocument({data:buf}).promise;var tot=pdf.numPages;
-      for(var p=1;p<=tot;p++){var pg=await pdf.getPage(p);var vp=pg.getViewport({scale:1.8});var c=document.createElement('canvas');c.width=vp.width;c.height=vp.height;await pg.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;mkQuizPages.push(c.toDataURL('image/jpeg',0.82));var pct=Math.round(p/tot*100);document.getElementById('qpdf-bar').style.width=pct+'%';document.getElementById('qpdf-pct').textContent=pct+'%';document.getElementById('qpdf-label').textContent='변환 중... ('+p+'/'+tot+'p)';}
-    } else {
-      var b64=await compressImg(file);mkQuizPages=[b64];
-    }
-    showQPdfPreview();
-  }catch(e){alert('PDF 오류: '+e.message);}
-  document.getElementById('qpdf-progress').classList.add('hidden');
-}
-
-function compressImg(file){return new Promise(function(res,rej){var r=new FileReader();r.onerror=rej;r.onload=function(e){var img=new Image();img.onerror=rej;img.onload=function(){var mx=1600,ratio=Math.min(mx/Math.max(img.width,img.height),1);var c=document.createElement('canvas');c.width=Math.round(img.width*ratio);c.height=Math.round(img.height*ratio);c.getContext('2d').drawImage(img,0,0,c.width,c.height);res(c.toDataURL('image/jpeg',0.85));};img.src=e.target.result;};r.readAsDataURL(file);});}
-
-function showQPdfPreview(){
-  var zone = document.getElementById('qpdf-zone');
-  if (zone) { zone.style.borderStyle='solid'; zone.style.borderColor='#34c759'; zone.style.background='rgba(52,199,89,.04)'; }
-  var icon = document.getElementById('qpdf-icon'); if (icon) icon.textContent = '✅';
-  var lbl  = document.getElementById('qpdf-label-text'); if (lbl) lbl.textContent = '✓ ' + mkQuizPages.length + '페이지 변환 완료';
-  var prev = document.getElementById('qpdf-prev');
-  if (prev) prev.innerHTML = '<p style="font-size:22px">✅</p><p style="font-size:13px;font-weight:600;color:#34c759">' + mkQuizPages.length + '페이지 변환 완료</p>';
-  var removeBtn = document.getElementById('qpdf-remove-btn');
-  if (removeBtn) removeBtn.classList.remove('hidden');
-}
-
-function clearQPdf(){
-  mkQuizPages=[];
-  var zone = document.getElementById('qpdf-zone'); if (zone) zone.removeAttribute('style');
-  var icon = document.getElementById('qpdf-icon'); if (icon) icon.textContent = '📄';
-  var lbl  = document.getElementById('qpdf-label-text'); if (lbl) lbl.textContent = '문제지 PDF 업로드';
-  var prev = document.getElementById('qpdf-prev');
-  if (prev) prev.innerHTML = '<p style="font-size:28px">📄</p><p style="font-size:13px;font-weight:600;color:#86868b">문제지 PDF 업로드</p>';
-  var removeBtn = document.getElementById('qpdf-remove-btn');
-  if (removeBtn) removeBtn.classList.add('hidden');
-  var inp = document.getElementById('qpdf-input'); if (inp) inp.value = '';
-}
-
-// ── 퀴즈 저장 (pages 포함) ───────────────────
-// ── startQuiz (PDF형/텍스트형 분기) ──────────
-function startQuiz(){
-  if(!quiz){alert('퀴즈를 먼저 선택해주세요.');return;}
-  document.getElementById('qh-book').textContent=quiz.book;
-  document.getElementById('qh-unit').textContent=quiz.unit;
-  document.getElementById('qh-name').textContent=sName;
-  var qs=quiz.questions.slice(0,assignedN);
-  document.getElementById('qh-prog').textContent=qs.length+'문제';
-
-  var textPanel=document.getElementById('quiz-text-panel');
-  var pdfPanel=document.getElementById('quiz-pdf-panel');
-
-  if(quiz.pages&&quiz.pages.length){
-    // PDF형
-    if(textPanel)textPanel.style.display='none';
-    if(pdfPanel)pdfPanel.style.display='flex';
-    var pgs=quiz.pages;
-    document.getElementById('q-pdf-pages').innerHTML=pgs.map(function(src){
-      return '<img src="'+src+'" style="width:100%;border-radius:10px;border:1px solid #e5e5e5;margin-bottom:8px">';
-    }).join('');
-    var con=document.getElementById('quiz-pdf-inputs');con.innerHTML='';
-    for(var i=0;i<qs.length;i++){
-      (function(idx){
-        var row=document.createElement('div');
-        row.style.cssText='display:flex;align-items:center;gap:8px;margin-bottom:6px';
-        row.innerHTML='<span style="width:28px;height:28px;border-radius:50%;background:#e5e5ea;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#86868b;flex-shrink:0">'+(idx+1)+'</span>'
-          +'<input type="text" data-i="'+idx+'" style="flex:1;padding:10px 12px;background:white;border:1px solid #e5e5e5;border-radius:10px;font-size:14px;outline:none" placeholder="정답" autocomplete="off" autocorrect="off" spellcheck="false">';
-        con.appendChild(row);
-        var inp=row.querySelector('input');
-        inp.addEventListener('input',updatePdfStatus);
-        inp.addEventListener('keydown',function(e){
-          if(e.key==='Enter'){
-            var all=Array.prototype.slice.call(document.querySelectorAll('#quiz-pdf-inputs input'));
-            var next=all[all.indexOf(inp)+1];
-            if(next)next.focus();
-          }
-        });
-      })(i);
-    }
-    updatePdfStatus();
-  }else{
-    // 텍스트형
-    if(pdfPanel)pdfPanel.style.display='none';
-    if(textPanel)textPanel.style.display='block';
-    var list=document.getElementById('q-list');list.innerHTML='';
-    qs.forEach(function(q,i){
-      var div=document.createElement('div');
-      div.className='bg-white rounded-[16px] border border-[#e5e5e5] p-5 space-y-3';
-      div.innerHTML='<div class="flex gap-3 items-start"><span class="w-7 h-7 rounded-full bg-[#0071e3] flex items-center justify-center text-white text-[11px] font-bold flex-shrink-0 mt-0.5">'+(i+1)+'</span><p class="text-[15px] font-medium leading-relaxed pt-0.5">'+renderQ(q.q)+'</p></div>'
-        +'<input type="text" class="fi w-full px-4 py-3 bg-[#f5f5f7] rounded-[10px] border border-[#e5e5e5] text-[15px]" placeholder="정답 입력" data-i="'+i+'" autocomplete="off" autocorrect="off" spellcheck="false">';
-      list.appendChild(div);
-      var inp=div.querySelector('input');
-      inp.addEventListener('keydown',function(e){
-        if(e.key==='Enter'){
-          var all=Array.prototype.slice.call(document.querySelectorAll('#q-list input'));
-          var next=all[all.indexOf(inp)+1];
-          if(next)next.focus();else document.getElementById('sub-btn').focus();
-        }
-      });
-    });
-  }
-  go('view-quiz');
-  setTimeout(function(){
-    var f=document.querySelector('#q-list input,#quiz-pdf-inputs input');
-    if(f)f.focus();
-  },300);
-}
-
-async function submitQuiz(){
-  var isPdf=quiz.pages&&quiz.pages.length;
-  var selector=isPdf?'#q-pdf-inputs input':'#q-list input';
-  var inputs=Array.prototype.slice.call(document.querySelectorAll(selector)).sort(function(a,b){return parseInt(a.dataset.i)-parseInt(b.dataset.i);});
-  var qs=quiz.questions.slice(0,assignedN);var correct=0,wrong=[];
-  inputs.forEach(function(inp,i){
-    var user=inp.value.trim().toLowerCase();
-    var rawKey=(qs[i]&&qs[i].a||'');
-    var keys=rawKey.split('/').map(function(k){return k.trim().toLowerCase();});
-    var isOk=keys.indexOf(user)>=0;
-    if(isOk){correct++;inp.style.borderColor='#34c759';inp.style.background='#f0fdf4';}
-    else{inp.style.borderColor='#ff3b30';inp.style.background='#fff5f5';wrong.push({q:i+1,qtext:qs[i].q,yours:inp.value.trim()||'(미입력)',key:rawKey.replace(/\//g,' 또는 ')});}
-  });
-  var n=inputs.length,score=Math.round(correct/n*100),status=score>=80?"PASS":"FAIL";
-  var btnEl=document.getElementById(isPdf?'sub-btn-pdf':'sub-btn');
-  var lblEl=document.getElementById(isPdf?'sub-lbl-pdf':'sub-lbl');
-  btnEl.disabled=true;lblEl.textContent='채점 중...';
-  try{await db.collection('results').add({name:sName,book:quiz.book,unit:quiz.unit,score:score,status:status,correct:correct,total:n,wrongAnswers:wrong,time:firebase.firestore.FieldValue.serverTimestamp()});}catch(e){}
-  var pass=status==="PASS";
-  document.getElementById('r-emoji').textContent=pass?'🎉':'💪';
-  document.getElementById('r-score').textContent=score+'점';
-  document.getElementById('r-detail').textContent=correct+' / '+n+' 정답';
-  var badge=document.getElementById('r-badge');badge.textContent=status;badge.className='inline-block px-6 py-2 rounded-full font-bold text-[16px] '+(pass?'sp':'sf');
-  if(wrong.length){document.getElementById('wr-wrap').classList.remove('hidden');document.getElementById('wr-list').innerHTML=wrong.map(function(w){return'<div class="bg-[#fff5f5] rounded-[10px] p-3.5 space-y-1"><p class="text-[12px] text-[#86868b]">Q'+w.q+'. '+w.qtext+'</p><p class="text-[13px]">내 답: <span class="text-[#ff3b30] font-mono">'+w.yours+'</span> → 정답: <span class="text-[#1a7f37] font-mono font-semibold">'+w.key+'</span></p></div>';}).join('');}
-  go('view-result');
-}
-
-
-function resetMake(){
-  document.getElementById('mk-book').value='';document.getElementById('mk-unit').value='';
-  document.getElementById('q-rows').innerHTML='';rowIdx=0;addRow();
-  qPdfPages=[];
-  var pz=document.getElementById('qpdf-zone');if(pz)pz.innerHTML='<div class="text-[32px] mb-2">📄</div><p class="text-[13px] text-[#86868b]">문제지 PDF 업로드</p>';
-  var at=document.getElementById('pdf-ans-text');if(at)at.value='';
-  var ac=document.getElementById('pdf-ans-count');if(ac)ac.textContent='0문항';
-}
-
-// ── PDF 퀴즈 모드 - 문제지 PDF 변환 ─────────────
-async function loadQPdf(input){
-  var file=input.files[0];if(!file)return;input.value='';
-  var zone=document.getElementById('qpdf-zone');zone.innerHTML='<p class="text-[13px] text-[#86868b]">변환 중...</p>';
-  var prog=document.getElementById('qpdf-progress');prog.classList.remove('hidden');
-  try{
-    var buf=await file.arrayBuffer();var pdf=await pdfjsLib.getDocument({data:buf}).promise;
-    var tot=pdf.numPages;qPdfPages=[];
-    for(var p=1;p<=tot;p++){
-      var page=await pdf.getPage(p);var vp=page.getViewport({scale:1.8});
-      var c=document.createElement('canvas');c.width=vp.width;c.height=vp.height;
-      await page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;
-      qPdfPages.push(c.toDataURL('image/jpeg',0.85));
-      document.getElementById('qpdf-bar').style.width=Math.round(p/tot*100)+'%';
-    }
-    var thumbs=qPdfPages.slice(0,3).map(function(b){return '<img src="'+b+'" class="h-14 rounded object-cover border border-[#e5e5e5]">';}).join('');
-    zone.innerHTML='<div class="flex items-center gap-3 mb-2"><div class="text-[22px]">📋</div><div class="text-left"><p class="text-[13px] font-semibold">'+file.name+'</p><p class="text-[12px] text-[#34c759] font-semibold">✓ '+tot+'페이지</p></div></div><div class="flex gap-2">'+thumbs+'</div>';
-  }catch(e){alert('변환 실패: '+e.message);zone.innerHTML='<p class="text-[13px] text-[#ff3b30]">변환 실패</p>';}
-  prog.classList.add('hidden');
-}
-
-function updatePdfAnsCount(){
-  var n=document.getElementById('pdf-ans-text').value.trim().split('\n').filter(function(l){return l.trim();}).length;
-  document.getElementById('pdf-ans-count').textContent=n+'문항';
-}
-
-// ── 정답지 PDF 파서 ───────────────────────────
-async function loadAnswerKeyPdf(input){
-  var file=input.files[0];if(!file)return;input.value='';
-  var btn=event.target.previousElementSibling||document.querySelector('[onclick="loadAnswerKeyPdf(this)"]');
-  document.getElementById('ak-loading').classList.remove('hidden');document.getElementById('ak-result').classList.add('hidden');
-  try{
-    var buf=await file.arrayBuffer();var pdf=await pdfjsLib.getDocument({data:buf}).promise;
-    var text='';
-    for(var p=1;p<=pdf.numPages;p++){var page=await pdf.getPage(p);var tc=await page.getTextContent();text+=tc.items.map(function(i){return i.str;}).join(' ')+'||';}
-    akParsedUnits=parseAnswerKey(text);showAkResult();
-  }catch(e){alert('PDF 파싱 실패: '+e.message);}
-  document.getElementById('ak-loading').classList.add('hidden');
-}
-function parseAnswerKey(text){
-  var units=[],lines=text.split('||').map(function(l){return l.trim();}).filter(Boolean);
-  var cur=null,ans=[];
-  for(var i=0;i<lines.length;i++){
-    var line=lines[i];
-    var um=line.match(/^(?:UNIT|Unit)\s+(\d+)\s+(.+?)(?:\s+pp\.\d[\d-]+)?$/);
-    if(um){if(cur&&ans.length)units.push({unit:cur,answers:ans.slice()});cur='Unit '+um[1]+' '+um[2].replace(/pp\.\d[\d-]+/,'').trim();ans=[];continue;}
-    var sm=line.match(/^([A-D])\s+1\.\s*(.+)/);
-    if(sm&&cur){var st=sm[1]+' 1. '+sm[2];var j=i+1;while(j<lines.length&&!lines[j].match(/^[A-D]\s+1\./)&&!lines[j].match(/^(?:UNIT|Unit)\s/)){st+=' '+lines[j];j++;}ans=ans.concat(extractNumberedAnswers(st).slice(0,10));i=j-1;}
-  }
-  if(cur&&ans.length)units.push({unit:cur,answers:ans.slice()});
-  return units;
-}
-function extractNumberedAnswers(text){
-  var answers=[],regex=/\d+\.\s*([^\d][^.]*?)(?=\s+\d+\.\s|\s*$)/g,m;
-  while((m=regex.exec(text))!==null){var a=m[1].trim().replace(/\[([^\]]+)\]/g,'/$1').replace(/\s*\/\s*/g,'/').replace(/[,;.]$/,'').trim();if(a&&a.length<60&&!a.match(/^pp\./))answers.push(a);}
-  return answers;
-}
-function showAkResult(){
-  document.getElementById('ak-result').classList.remove('hidden');document.getElementById('ak-unit-count').textContent=akParsedUnits.length;
-  var sel=document.getElementById('ak-unit-sel');sel.innerHTML='<option value="">— 유닛 선택 —</option>';
-  akParsedUnits.forEach(function(u,i){sel.innerHTML+='<option value="'+i+'">'+u.unit+' ('+u.answers.length+'개)</option>';});
-  document.getElementById('ak-answers-wrap').classList.add('hidden');
-}
-function onAkUnitSelect(sel){
-  var idx=parseInt(sel.value);if(isNaN(idx)){document.getElementById('ak-answers-wrap').classList.add('hidden');return;}
-  var unit=akParsedUnits[idx];akSelAnswers=unit.answers;
-  document.getElementById('ak-ans-count').textContent=unit.answers.length+'개 추출됨';
-  document.getElementById('ak-preview').textContent=unit.answers.map(function(a,i){return (i+1)+'. '+a;}).join(String.fromCharCode(10));
-  document.getElementById('ak-answers-wrap').classList.remove('hidden');
-}
-function loadAkIntoForm(){
-  if(!akSelAnswers.length)return;
-  var idx=parseInt(document.getElementById('ak-unit-sel').value);
-  var unit=akParsedUnits[idx];
-  if(!document.getElementById('mk-unit').value)document.getElementById('mk-unit').value=unit.unit;
-  // 현재 모드에 따라 다르게 로드
-  if(makeMode==='text'){
-    var con=document.getElementById('q-rows');con.innerHTML='';rowIdx=0;
-    akSelAnswers.forEach(function(ans){
-      var i=rowIdx++;var div=document.createElement('div');div.className='qrow items-center';div.id='row-'+i;
-      div.innerHTML='<input type="text" class="fi q-text px-3.5 py-2.5 bg-[#f5f5f7] rounded-[10px] border border-[#e5e5e5] text-[14px] w-full" placeholder="문제 입력" oninput="updCount()"><input type="text" class="fi q-ans px-3.5 py-2.5 bg-[#f0f7ff] rounded-[10px] border border-[#bfdbfe] text-[14px] w-full font-semibold" value="'+ans.replace(/"/g,'&quot;')+'"><button onclick="delRow('+i+')" class="w-9 h-9 rounded-full bg-[#fff0ef] text-[#ff3b30] font-bold text-[16px] flex items-center justify-center">×</button>';
-      con.appendChild(div);
-    });updCount();
-  } else {
-    // PDF 모드 - 정답 텍스트박스에 채우기
-    document.getElementById('pdf-ans-text').value=akSelAnswers.join(String.fromCharCode(10));
-    updatePdfAnsCount();
-  }
-  setTimeout(function(){document.getElementById('q-rows').scrollIntoView({behavior:'smooth'});},100);
-  alert('✅ '+akSelAnswers.length+'개 정답 불러오기 완료!');
-}
-
-// ── 학생 퀴즈 풀기 ────────────────────────────
 function renderQ(text){return text.replace(/_{2,}/g,'<span style="display:inline-block;border-bottom:2px solid #0071e3;min-width:60px;color:#0071e3;font-weight:600">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span>');}
 
 
